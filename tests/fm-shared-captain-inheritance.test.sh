@@ -8,7 +8,7 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-# shellcheck source=bin/fm-config-inherit-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-config-inherit-lib.sh"
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
@@ -204,6 +204,31 @@ test_unsafe_artifacts_and_failure_restore_readonly_mode() {
   pass "unsafe shared captain artifacts are rejected and failure restores read-only mode"
 }
 
+test_header_check_names_the_missing_phrase() {
+  local valid_path missing_path out rc
+
+  valid_path="$TMP_ROOT/valid-header.md"
+  shared_header > "$valid_path"
+  out=$(shared_captain_header_valid "$valid_path"); rc=$?
+  [ "$rc" -eq 0 ] || fail "the valid fixture header should still pass"
+  [ -z "$out" ] || fail "a passing header should not report a missing phrase, got: $out"
+
+  missing_path="$TMP_ROOT/missing-phrase-header.md"
+  cat > "$missing_path" <<'EOF'
+# Shared captain preferences
+
+This file is main-authoritative in the main firstmate home.
+In secondmate homes it is read-only in secondmate homes.
+Route new captain-preference discoveries to the main firstmate through marked status or a document pointer.
+EOF
+  out=$(shared_captain_header_valid "$missing_path"); rc=$?
+  [ "$rc" -ne 0 ] || fail "a header missing a required phrase should still fail"
+  assert_contains "$out" "must not be edited there" \
+    "the failure should name the one phrase this header is missing"
+
+  pass "the header check names the first required phrase it did not find, without widening the accept set"
+}
+
 make_fake_spawn_toolchain() {
   local dir=$1 fakebin
   fakebin="$dir/fakebin"
@@ -214,6 +239,47 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   printf '%s\n' "$fakebin"
+}
+
+# Version-aware stubs so bootstrap's tool floors stay quiet in fixture PATH.
+add_bootstrap_compatible_tools() {
+  local fakebin=$1
+  fm_fake_exit0 "$fakebin" node chrome-devtools-axi gh treehouse
+  fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.77
+  cat > "$fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' '0.1.29'
+  exit 0
+fi
+exit 0
+SH
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' 'no-mistakes version v1.46.0 (fake)'
+  exit 0
+fi
+exit 0
+SH
+  cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "--version ") printf '%s\n' '0.2.6' ;;
+  "update --help") printf '%s\n' 'usage: tasks-axi update <id> [flags]' '  --archive-body' ;;
+  "mv --help") printf '%s\n' 'usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>' ;;
+esac
+exit 0
+SH
+  cat > "$fakebin/quota-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' '0.1.51'
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/gh-axi" "$fakebin/no-mistakes" "$fakebin/tasks-axi" "$fakebin/quota-axi"
 }
 
 new_git_world() {
@@ -286,7 +352,7 @@ EOF
   printf -- '- sm - fixture secondmate (home: %s; scope: fixture; projects: sample; added 2026-07-16)\n' "$sm" \
     > "$data_override/secondmates.md"
   fakebin=$(make_fake_spawn_toolchain "$w")
-  fm_fake_exit0 "$fakebin" node gh-axi chrome-devtools-axi lavish-axi gh treehouse no-mistakes tasks-axi quota-axi
+  add_bootstrap_compatible_tools "$fakebin"
 
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
     FM_DATA_OVERRIDE="$data_override" \
@@ -330,13 +396,14 @@ EOF
 }
 
 test_session_start_digest_labels_shared_file_and_read_once_rule() {
-  local rec w root home _sm fakebin out
+  local rec w root home _sm fakebin out contract
   rec=$(new_git_world session-start-label)
   IFS='|' read -r w root home _sm <<EOF
 $rec
 EOF
   fakebin=$(make_fake_spawn_toolchain "$w")
-  fm_fake_exit0 "$fakebin" node gh-axi chrome-devtools-axi lavish-axi gh treehouse no-mistakes tasks-axi quota-axi pgrep
+  add_bootstrap_compatible_tools "$fakebin"
+  fm_fake_exit0 "$fakebin" pgrep
 
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
     "$ROOT/bin/fm-session-start.sh")
@@ -344,8 +411,9 @@ EOF
   assert_contains "$out" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)" \
     "session-start digest should label the shared captain file unmistakably"
   assert_contains "$out" "shared from primary" "session-start digest should render the shared file"
-  assert_contains "$out" "data/captain-shared.md, data/learnings.md" \
-    "read-once reminder should include captain-shared.md"
+  contract=$(printf '%s\n' "$out" | awk '/^READ-ONCE CONTRACT$/ { f = 1 } /^FLEET STATE$/ { f = 0 } f')
+  assert_contains "$contract" "data/captain-shared.md" \
+    "read-once contract should name captain-shared.md among the files it covers"
   pass "session-start digest renders data/captain-shared.md with the shared read-only label"
 }
 
@@ -357,5 +425,6 @@ test_spawn_convergence_point_copies_shared_file
 test_bootstrap_convergence_point_copies_shared_file
 test_config_push_convergence_point_updates_changed_source
 test_session_start_digest_labels_shared_file_and_read_once_rule
+test_header_check_names_the_missing_phrase
 
 echo "# all fm-shared-captain-inheritance tests passed"

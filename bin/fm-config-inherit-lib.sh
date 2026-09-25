@@ -4,10 +4,27 @@
 # config/, so a secondmate's OWN crewmates inherit the primary's settings
 # (e.g. primary config/crew-dispatch.json makes a secondmate use the same dispatch
 # profile rules, primary config/crew-harness=codex makes a secondmate's crewmates
-# spawn on codex too, and primary config/backlog-backend=manual makes that home
-# hand-edit backlog files too). It also pushes the one primary-authoritative
-# shared captain-preference file, data/captain-shared.md, into each secondmate
-# home's data/ as a read-only copy.
+# spawn on codex too, primary config/backlog-backend=manual makes that home
+# hand-edit backlog files too, primary config/backend pins that home's local
+# runtime-backend default for future spawns, primary config/startup-memory-budget
+# bounds that home's startup-memory curation, and primary
+# config/herdr-presentation-spaces carries the same Herdr presentation-projection
+# preference - an absent primary file and an absent destination file both mean
+# the same unconfigured default, so the generic absence mirror below converges
+# a secondmate without deciding the release-dependent floor; explicit "on" and
+# "off" preferences propagate as files. Primary
+# config/trace-context is copied at the launch convergence point as part of the
+# default-off W3C trace-context setup, while live convergence leaves it unchanged.
+# Primary config/lavish-axi-host carries the one per-machine Lavish server address
+# to every worker so a worker never starts a second server on another interface.
+# The primary passes its frozen home-session decision into a newly launched
+# Secondmate; see docs/trace-context.md.
+# Primary config/claude-permission-mode is a captain-wide safety preference
+# (bypass or auto for every claude launch), so it flows down too and a
+# secondmate's own claude crewmates launch on the same permission posture.
+# It also pushes
+# the one primary-authoritative shared captain-preference file,
+# data/captain-shared.md, into each secondmate home's data/ as a read-only copy.
 #
 # Usage: . bin/fm-config-inherit-lib.sh   (no FM_* setup required)
 #
@@ -29,6 +46,18 @@
 # is deliberately NOT in the list: it is the primary's own setting for launching
 # secondmates, and a secondmate never spawns secondmates, so it must not flow
 # downstream.
+#
+# That single declaration is also the ONE owner of the inherited-material
+# allowlist for remote routes: bin/fm-remote-inherit-push.sh (sender) and
+# bin/fm-remote-inherit.sh (receiver, executing inside the remote home) both
+# derive their item set from fm_config_inherit_items rather than restating it,
+# so a new inheritable item cannot be accepted by one side and refused by the
+# other. A local and remote code root that disagree about this list must be
+# reconciled by the ordinary remote sync/update path before the transfer
+# succeeds; there is no separate allowlist version negotiation.
+#
+# shellcheck source=bin/fm-startup-memory-budget-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-startup-memory-budget-lib.sh"
 
 # The one shared data file in this inheritance contract. There is deliberately
 # no shared learnings file.
@@ -39,11 +68,47 @@ FM_SHARED_CAPTAIN_MODE="444"
 # The declared inheritable set (space-separated, config-dir-relative item paths).
 # Extend here to inherit more of the primary's local config; override via the
 # environment only in tests. Items must not contain whitespace.
-FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend}"
+FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend backend herdr-presentation-spaces startup-memory-budget trace-context launch-env-allowlist claude-permission-mode lavish-axi-host}"
+
+# Items whose value is a home-SESSION enablement decision rather than durable
+# local configuration. They are inherited at the launch convergence point, where
+# the primary also hands the new process its frozen on/off decision, and left
+# untouched by live convergence into an already-running home, whose decision is
+# already frozen for its current session (bin/fm-trace-context-lib.sh).
+FM_SESSION_SCOPED_INHERITABLE_CONFIG="trace-context"
+
+# True when <item> is session-scoped in the sense above.
+fm_config_inherit_item_session_scoped() {  # <item>
+  local item=$1 candidate
+  for candidate in $FM_SESSION_SCOPED_INHERITABLE_CONFIG; do
+    [ "$candidate" = "$item" ] && return 0
+  done
+  return 1
+}
+
+# The complete declared inherited-material set as home-relative paths, one per
+# line, in propagation order: every FM_INHERITABLE_CONFIG item under config/,
+# then the one shared data file. This is what remote senders and receivers
+# derive from, so both ends of a transfer agree by construction.
+fm_config_inherit_items() {
+  local item
+  for item in $FM_INHERITABLE_CONFIG; do
+    printf 'config/%s\n' "$item"
+  done
+  printf '%s\n' "$FM_SHARED_CAPTAIN_REL"
+}
+
+fm_config_source_present() {
+  perl -MErrno=ENOENT -e '
+    if (lstat $ARGV[0]) { print 1 }
+    elsif ($! == ENOENT) { print 0 }
+    else { die "error: cannot inspect configuration source at $ARGV[0]: $!\n" }
+  ' -- "$1"
+}
 
 fm_inherit_file_mode() {
   if [ "$(uname)" = Darwin ]; then
-    stat -f %Lp "$1" 2>/dev/null
+    /usr/bin/stat -f %Lp "$1" 2>/dev/null
   else
     stat -c %a "$1" 2>/dev/null
   fi
@@ -51,7 +116,7 @@ fm_inherit_file_mode() {
 
 fm_inherit_file_device() {
   if [ "$(uname)" = Darwin ]; then
-    stat -f %d "$1" 2>/dev/null
+    /usr/bin/stat -f %d "$1" 2>/dev/null
   else
     stat -c %d "$1" 2>/dev/null
   fi
@@ -59,7 +124,7 @@ fm_inherit_file_device() {
 
 fm_inherit_file_link_count() {
   if [ "$(uname)" = Darwin ]; then
-    stat -f %l "$1" 2>/dev/null
+    /usr/bin/stat -f %l "$1" 2>/dev/null
   else
     stat -c %h "$1" 2>/dev/null
   fi
@@ -123,12 +188,13 @@ destination_allows_inherited_item() {
 # so this writes nothing there. It emits concise stderr diagnostics only for
 # notable events: a guard skip or a copy/remove error. A source item that is
 # present is copied only when its content differs (idempotent: a re-run never
-# churns mtimes). A source item that is absent is mirrored as a missing
+# churns mtimes). A source item proven absent is mirrored as a missing
 # destination item, so clearing the primary's value clears it downstream too
-# (primary-authoritative). The destination dir is created lazily, only when there
-# is actually something to write, so a primary with no inherited config item set is a
-# complete no-op (it leaves the secondmate home exactly as it was - the
-# backward-compatible path). When FM_CONFIG_INHERIT_REPORT points at a writable
+# (primary-authoritative). Inspection errors or existing nonregular sources
+# leave that destination item unchanged and report an error; inaccessible paths
+# and dangling source links must never silently remove an inherited grant.
+# The destination dir is created lazily, only when there is something to copy;
+# absence on both sides is a no-op. When FM_CONFIG_INHERIT_REPORT points at a writable
 # file, one tab-separated line per item is appended there:
 #   <item> <status> <reason>
 # Status is pushed, unchanged, skipped, or error. Skipped items are warnings and
@@ -154,14 +220,18 @@ warn_inheritable_config_error() {
   echo "fm-config-inherit: error: $reason $item at $dest" >&2
 }
 
+# Prints nothing and returns 0 when the header carries every required phrase.
+# Otherwise prints the first required phrase it did not find on stdout and
+# returns 1, so a caller can name the concrete gap instead of a generic
+# rejection. The accept set itself is unchanged.
 shared_captain_header_valid() {
   local src=$1 head
   head=$(sed -n '1,12p' "$src" 2>/dev/null) || return 1
-  case "$head" in *main-authoritative*) ;; *) return 1 ;; esac
-  case "$head" in *"read-only in secondmate homes"*) ;; *) return 1 ;; esac
-  case "$head" in *"must not be edited there"*) ;; *) return 1 ;; esac
-  case "$head" in *"main firstmate"*) ;; *) return 1 ;; esac
-  case "$head" in *"marked status"*|*"document pointer"*) ;; *) return 1 ;; esac
+  case "$head" in *main-authoritative*) ;; *) printf '%s' "main-authoritative"; return 1 ;; esac
+  case "$head" in *"read-only in secondmate homes"*) ;; *) printf '%s' "read-only in secondmate homes"; return 1 ;; esac
+  case "$head" in *"must not be edited there"*) ;; *) printf '%s' "must not be edited there"; return 1 ;; esac
+  case "$head" in *"main firstmate"*) ;; *) printf '%s' "main firstmate"; return 1 ;; esac
+  case "$head" in *"marked status"*|*"document pointer"*) ;; *) printf '%s' "marked status\" or \"document pointer"; return 1 ;; esac
 }
 
 shared_captain_dir_safe() {
@@ -260,7 +330,7 @@ copy_shared_captain_file() {
 }
 
 propagate_shared_captain_preferences() {
-  local src_data=$1 dest_data=$2 src dest src_hash dest_hash dest_parent dest_home quarantine reason rc
+  local src_data=$1 dest_data=$2 src dest src_hash dest_hash dest_parent dest_home quarantine reason rc missing
   [ -n "$src_data" ] || return 1
   [ -n "$dest_data" ] || return 1
   src="$src_data/$FM_SHARED_CAPTAIN_FILE"
@@ -276,8 +346,9 @@ propagate_shared_captain_preferences() {
       record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" error "$reason"
       return 1
     fi
-    if ! shared_captain_header_valid "$src"; then
+    if ! missing=$(shared_captain_header_valid "$src"); then
       reason="primary source header missing required main-authoritative warning"
+      [ -z "$missing" ] || reason="$reason: missing \"$missing\""
       warn_inheritable_config_error "$FM_SHARED_CAPTAIN_REL" "$src" "$reason"
       record_inheritable_config_result "$FM_SHARED_CAPTAIN_REL" error "$reason"
       return 1
@@ -388,7 +459,7 @@ propagate_secondmate_inheritance() {
 }
 
 propagate_inheritable_config() {
-  local src_config=$1 dest_config=$2 item src dest reason rc
+  local src_config=$1 dest_config=$2 item src dest source_present reason rc
   [ -n "$src_config" ] || return 1
   [ -n "$dest_config" ] || return 1
   rc=0
@@ -396,8 +467,60 @@ propagate_inheritable_config() {
     case "$item" in
       ''|/*|.|..|../*|*/../*|*/..) return 1 ;;
     esac
+    if [ "${FM_CONFIG_INHERIT_LIVE:-0}" = 1 ] && fm_config_inherit_item_session_scoped "$item"; then
+      record_inheritable_config_result "$item" unchanged "session-scoped"
+      continue
+    fi
     src="$src_config/$item"
     dest="$dest_config/$item"
+    if ! source_present=$(fm_config_source_present "$src"); then
+      reason="cannot inspect primary source"
+      warn_inheritable_config_error "$item" "$src" "$reason"
+      record_inheritable_config_result "$item" error "$reason"
+      rc=1
+      continue
+    fi
+    # This one scalar config is consumed as a local safety boundary, so reject
+    # every unsafe or malformed source/destination artifact before the generic
+    # byte-copy behavior below can treat it as ordinary inherited material.
+    if [ "$item" = "$FM_STARTUP_MEMORY_BUDGET_FILE" ]; then
+      if [ -e "$src_config" ] || [ -L "$src_config" ]; then
+        if ! fm_startup_memory_budget_config_dir_safe "$src_config"; then
+          reason="unsafe primary config directory: $FM_STARTUP_MEMORY_BUDGET_ERROR"
+          warn_inheritable_config_error "$item" "$src_config" "$reason"
+          record_inheritable_config_result "$item" error "$reason"
+          rc=1
+          continue
+        fi
+      fi
+      if [ -e "$dest_config" ] || [ -L "$dest_config" ]; then
+        if ! fm_startup_memory_budget_config_dir_safe "$dest_config"; then
+          reason="unsafe destination config directory: $FM_STARTUP_MEMORY_BUDGET_ERROR"
+          warn_inheritable_config_error "$item" "$dest_config" "$reason"
+          record_inheritable_config_result "$item" error "$reason"
+          rc=1
+          continue
+        fi
+      fi
+      if [ -e "$src" ] || [ -L "$src" ]; then
+        if ! fm_startup_memory_budget_file_valid "$src"; then
+          reason="unsafe or invalid primary source: $FM_STARTUP_MEMORY_BUDGET_ERROR"
+          warn_inheritable_config_error "$item" "$src" "$reason"
+          record_inheritable_config_result "$item" error "$reason"
+          rc=1
+          continue
+        fi
+      fi
+      if [ -e "$dest" ] || [ -L "$dest" ]; then
+        if ! fm_startup_memory_budget_file_valid "$dest"; then
+          reason="unsafe or invalid destination: $FM_STARTUP_MEMORY_BUDGET_ERROR"
+          warn_inheritable_config_error "$item" "$dest" "$reason"
+          record_inheritable_config_result "$item" error "$reason"
+          rc=1
+          continue
+        fi
+      fi
+    fi
     if [ -f "$src" ]; then
       if ! destination_allows_inherited_item "$dest_config" "$item"; then
         reason=$(inheritable_config_skip_reason)
@@ -417,6 +540,11 @@ propagate_inheritable_config() {
       else
         record_inheritable_config_result "$item" unchanged ""
       fi
+    elif [ "$source_present" = 1 ]; then
+      reason="primary source is not a regular file"
+      warn_inheritable_config_error "$item" "$src" "$reason"
+      record_inheritable_config_result "$item" error "$reason"
+      rc=1
     elif [ -e "$dest" ] || [ -L "$dest" ]; then
       if ! destination_allows_inherited_item "$dest_config" "$item"; then
         reason=$(inheritable_config_skip_reason)
